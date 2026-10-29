@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Gimnasio</title>
+<style>
+:root{--bg:#f4f1ec;--panel:#fff;--ink:#1d1b19;--mute:#6f6a63;--line:#e3ddd4;--acc:#d9480f;--accink:#fff;--bad:#c92a2a;--ok:#2b8a3e;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#151413;--panel:#201e1c;--ink:#f2ede6;--mute:#a39c92;--line:#35312d;--acc:#ff7a33;--accink:#1a0d03;--bad:#ff8787;--ok:#69db7c;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 "Segoe UI",Roboto,system-ui,sans-serif;padding:14px 14px 96px}
+main{max-width:640px;margin:0 auto}
+.top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+h1{font:800 1.35rem/1.1 "Arial Black","Segoe UI",sans-serif;text-transform:uppercase;margin:6px 0 2px}
+h2{font-size:1.05rem;margin:0 0 8px}
+.mute{color:var(--mute);font-size:.9rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.big{font:800 2rem/1.1 "Arial Black","Segoe UI",sans-serif;color:var(--acc)}
+.row{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row b{display:block}
+input,select{font:inherit;width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);margin:4px 0}
+.btn{font:inherit;font-weight:700;padding:12px 16px;border-radius:10px;border:0;background:var(--acc);color:var(--accink);width:100%;margin-top:8px}
+.btn.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.btn:disabled{opacity:.45}
+.sm{font:inherit;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--ink)}
+.sm.bad{color:var(--bad);border-color:var(--bad)}
+.qty{display:flex;align-items:center;gap:8px}.qty span{min-width:22px;text-align:center;font-weight:700}
+.tag{font-size:.75rem;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.low{color:var(--bad)}
+nav{position:fixed;left:0;right:0;bottom:0;display:none;background:var(--panel);border-top:1px solid var(--line)}
+nav button{flex:1;font:inherit;font-size:.82rem;font-weight:600;padding:13px 4px;background:none;border:0;color:var(--mute)}
+nav button.on{color:var(--acc);box-shadow:inset 0 3px 0 var(--acc)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+#toast{position:fixed;left:14px;right:14px;bottom:70px;background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:10px;display:none;z-index:5}
+</style>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<!--CONFIG-->
+</head>
+<body>
+<main>
+  <div class="top"><h1>Control del gimnasio</h1><button class="sm" id="out" data-act="logout" style="display:none">Salir</button></div>
+  <div class="mute" id="live"></div>
+  <div id="view"><div class="card">Cargando…</div></div>
+</main>
+<nav id="nav">
+  <button data-tab="hoy" class="on">Hoy</button>
+  <button data-tab="cli">Clientes</button>
+  <button data-tab="ven">Vender</button>
+  <button data-tab="inv">Inventario</button>
+</nav>
+<div id="toast" role="status"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>{const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML};
+const num=v=>{const n=parseFloat(String(v).replace(",","."));return isNaN(n)?0:n};
+const money=n=>"C$ "+(Math.round(n*100)/100).toLocaleString("es",{maximumFractionDigits:2});
+const fmt=i=>{try{return new Date(i).toLocaleString("es",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}catch(e){return ""}};
+const sum=(a,k)=>a.reduce((t,x)=>t+(+x[k]||0),0);
+let auth,fs,FV,user=null,started=false,ready=false,unsubs=[],tab="hoy",cart={},armed=null,confirmClose=false,q="",pending=false;
+const S={members:[],inv:[],sales:[],closings:[],day:null};
+const open=()=>S.day&&!S.day.closed;
+const today=a=>S.day?a.filter(x=>x.dayId===S.day.id):[];
+
+function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
+async function safe(fn){try{await fn()}catch(e){toast(e&&e.code==="permission-denied"?"No tienes permiso para guardar.":"No se pudo guardar: "+((e&&e.message)||"error"))}}
+function live(){$("#live").textContent=user?(navigator.onLine?"En vivo · "+user.email:"Sin internet: se actualizará al reconectar"):""}
+window.addEventListener("online",live);window.addEventListener("offline",live);
+
+function boot(){
+  const c=window.FIREBASE_CONFIG;
+  if(typeof firebase==="undefined"){$("#view").innerHTML='<div class="card"><h2>Sin internet</h2><p class="mute">Conéctate a datos o wifi y vuelve a abrir la app.</p></div>';return}
+  if(!c||!c.apiKey||/PEGA/.test(c.apiKey)){$("#view").innerHTML='<div class="card"><h2>Falta configurar Firebase</h2><p class="mute">Revisa el archivo config.js.</p></div>';return}
+  firebase.initializeApp(c);
+  auth=firebase.auth();fs=firebase.firestore();FV=firebase.firestore.FieldValue;
+  fs.settings({experimentalAutoDetectLongPolling:true,merge:true});
+  auth.onAuthStateChanged(u=>{user=u;live();if(u){$("#nav").style.display="flex";$("#out").style.display="";subs()}else{unsubs.forEach(f=>f());unsubs=[];started=false;ready=false;$("#nav").style.display="none";$("#out").style.display="none";login()}});
+}
+function subs(){
+  if(started)return;started=true;
+  const err=e=>toast("Error de lectura: "+(e.code||e.message));
+  const sub=(p,k)=>fs.collection(p).onSnapshot(s=>{S[k]=s.docs.map(d=>({id:d.id,...d.data()}));render()},err);
+  unsubs=[sub("members","members"),sub("inventory","inv"),sub("sales","sales"),sub("closings","closings"),
+    fs.doc("config/day").onSnapshot(s=>{S.day=s.exists?s.data():null;ready=true;render()},err)];
+}
+function login(){$("#view").innerHTML='<div class="card"><h2>Entrar</h2><input id="le" type="email" placeholder="Correo del gimnasio" autocomplete="username"><input id="lp" type="password" placeholder="Clave" autocomplete="current-password"><button class="btn" data-act="login">Entrar</button><p class="mute" id="lerr"></p></div>'}
+
+function render(){
+  if(!ready||!user)return;
+  const a=document.activeElement;
+  if(a&&/INPUT|SELECT/.test(a.tagName)&&$("#view").contains(a)){pending=true;return}
+  pending=false;
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.tab===tab));
+  $("#view").innerHTML={hoy:vHoy,cli:vCli,ven:vVen,inv:vInv}[tab]();
+}
+document.addEventListener("focusout",()=>{if(pending)setTimeout(render,400)});
+const closedMsg=()=>open()?"":'<p class="mute">No hay un turno abierto. Inícialo en la pestaña Hoy.</p>';
+
+function vHoy(){
+  const d=S.day,exp=d&&d.closed?(+d.expectedCash||0):0;
+  const startCard=`<div class="card"><h2>Iniciar turno</h2><p class="mute">Dinero que debe haber en caja ${d?"(según el cierre anterior)":"(primer turno)"}</p><div class="big">${money(exp)}</div><label class="mute" for="oc">Dinero contado en caja ahora</label><input id="oc" inputmode="decimal" value="${exp}"><button class="btn" data-act="start" data-exp="${exp}">Iniciar turno</button></div>`;
+  const past='<div class="card"><h2>Cierres anteriores</h2>'+(S.closings.length?[...S.closings].sort((a,b)=>a.closedAt<b.closedAt?1:-1).slice(0,7).map(c=>`<div class="row"><div><b>${esc(fmt(c.closedAt))}</b><span class="mute">${c.members} membresías · ${c.units} productos</span></div><div style="text-align:right"><span class="mute">En caja</span><b>${money(c.expectedCash)}</b></div></div>`).join(""):'<p class="mute">Todavía no hay cierres.</p>')+"</div>";
+  if(!d)return startCard+past;
+  const ms=today(S.members),ss=today(S.sales),mt=sum(ms,"price"),st=sum(ss,"total");
+  const units=ss.reduce((a,s)=>a+(s.items||[]).reduce((b,i)=>b+(+i.qty||0),0),0);
+  const opening=+d.openingCash||0,should=opening+mt+st,diff=+d.diffOpen||0;
+  const mov=[...ms.map(m=>({t:m.paidAt,k:"Membresía",x:m.name+" · "+m.plan,v:m.price})),...ss.map(s=>({t:s.paidAt,k:"Venta",x:(s.items||[]).map(i=>i.qty+"× "+i.name).join(", "),v:s.total}))].sort((a,b)=>a.t<b.t?1:-1);
+  let btn="";
+  if(!d.closed)btn=confirmClose?`<p class="mute" style="margin-top:10px">Al cerrar, debe haber en caja: <b>${money(should)}</b></p><button class="btn" data-act="close">Sí, finalizar cierre</button><button class="btn alt" data-act="cancel">Cancelar</button>`:'<button class="btn" data-act="ask">Finalizar cierre</button>';
+  return `<div class="card"><span class="tag">${d.closed?"Turno cerrado":"Turno abierto"}</span> <span class="mute">desde ${esc(fmt(d.startedAt))}</span>
+  <h2 style="margin-top:10px">Dinero en caja</h2>
+  <div class="row"><span>Caja al iniciar el turno</span><b>${money(opening)}</b></div>
+  ${diff?`<div class="row"><span class="${diff<0?"low":"mute"}">Diferencia al recibir (se esperaba ${money(d.expectedOpening||0)})</span><b class="${diff<0?"low":""}">${diff>0?"+":""}${money(diff)}</b></div>`:""}
+  <div class="row"><span>+ Membresías (${ms.length})</span><b>${money(mt)}</b></div>
+  <div class="row"><span>+ Ventas (${units} productos)</span><b>${money(st)}</b></div>
+  <div style="margin-top:10px"><span class="mute">${d.closed?"Debió quedar en caja al cierre":"Debe haber en caja ahora"}</span><div class="big">${money(d.closed?(+d.expectedCash||should):should)}</div></div>${btn}</div>
+  ${d.closed?startCard:""}
+  <div class="card"><h2>Movimientos del turno</h2>${mov.length?mov.map(m=>`<div class="row"><div><b>${esc(m.x)}</b><span class="mute">${m.k} · ${esc(fmt(m.t))}</span></div><b>${money(m.v)}</b></div>`).join(""):'<p class="mute">Sin movimientos todavía.</p>'}</div>`+past;
+}
+
+function mlist(){
+  const f=q.trim().toLowerCase();
+  const l=[...S.members].filter(m=>!f||(m.name||"").toLowerCase().includes(f)).sort((a,b)=>a.paidAt<b.paidAt?1:-1).slice(0,80);
+  return l.length?l.map(m=>{const can=open()&&m.dayId===S.day.id;return `<div class="row"><div><b>${esc(m.name)}</b><span class="mute">${esc(m.plan)} · ${esc(fmt(m.paidAt))}</span></div><div style="text-align:right"><b>${money(m.price)}</b>${can?`<br><button class="sm bad" data-act="delm" data-id="${esc(m.id)}">${armed===m.id?"¿Seguro?":"Quitar"}</button>`:""}</div></div>`}).join(""):'<p class="mute">Sin resultados.</p>';
+}
+function vCli(){
+  return `<div class="card"><h2>Registrar pago de membresía</h2>${closedMsg()}
+  <input id="mn" placeholder="Nombre del cliente" autocomplete="off"><input id="mp" placeholder="Membresía (Mensual, Semanal…)" list="plans"><datalist id="plans"><option>Diaria</option><option>Semanal</option><option>Quincenal</option><option>Mensual</option></datalist>
+  <input id="mv" placeholder="Precio" inputmode="decimal"><button class="btn" data-act="addm" ${open()?"":"disabled"}>Registrar (fecha de hoy)</button></div>
+  <div class="card"><h2>Pagos registrados</h2><input id="mq" placeholder="Buscar cliente" value="${esc(q)}" oninput="q=this.value;$('#ml').innerHTML=mlist()"><div id="ml">${mlist()}</div></div>`;
+}
+function vVen(){
+  const items=[...S.inv].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const tot=items.reduce((t,i)=>t+(cart[i.id]||0)*i.price,0);
+  return `<div class="card"><h2>Registrar venta</h2>${closedMsg()}${items.length?items.map(i=>`<div class="row"><div><b>${esc(i.name)}</b><span class="mute">${money(i.price)} · quedan ${i.stock}</span></div><div class="qty"><button class="sm" data-act="dec" data-id="${esc(i.id)}">−</button><span>${cart[i.id]||0}</span><button class="sm" data-act="inc" data-id="${esc(i.id)}">+</button></div></div>`).join(""):'<p class="mute">Primero agrega productos en Inventario.</p>'}
+  <div class="row"><b>Total</b><span class="big" style="font-size:1.5rem">${money(tot)}</span></div><button class="btn" data-act="sell" ${open()&&tot>0?"":"disabled"}>Listo: registrar venta</button></div>`;
+}
+function vInv(){
+  const items=[...S.inv].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  return `<div class="card"><h2>Agregar producto</h2><input id="in" placeholder="Nombre (agua, Raptor, proteína…)"><div class="grid"><input id="ip" placeholder="Precio" inputmode="decimal"><input id="is" placeholder="Cantidad" inputmode="numeric"></div><button class="btn" data-act="addi">Agregar al inventario</button></div>
+  <div class="card"><h2>Inventario</h2>${items.length?items.map(i=>`<div class="row"><div><b>${esc(i.name)}</b><span class="mute">${money(i.price)} · </span><span class="${i.stock<=3?"low":"mute"}">${i.stock} en stock${i.stock<=3?" (poco)":""}</span></div><div class="qty"><input id="r_${esc(i.id)}" placeholder="+" inputmode="numeric" style="width:64px;margin:0"><button class="sm" data-act="restock" data-id="${esc(i.id)}">Sumar</button><button class="sm bad" data-act="deli" data-id="${esc(i.id)}">${armed===i.id?"¿Seguro?":"×"}</button></div></div>`).join(""):'<p class="mute">Aún no hay productos.</p>'}</div>`;
+}
+
+document.getElementById("nav").addEventListener("click",e=>{const b=e.target.closest("button");if(b){tab=b.dataset.tab;armed=null;render()}});
+document.addEventListener("click",e=>{
+  const b=e.target.closest("[data-act]");if(!b||!fs)return;
+  const a=b.dataset.act,id=b.dataset.id;
+  if(a==="login"){const em=$("#le").value.trim(),pw=$("#lp").value;$("#lerr").textContent="Entrando…";auth.signInWithEmailAndPassword(em,pw).catch(x=>{$("#lerr").textContent=/network/.test(x.code)?"Sin internet.":"Correo o clave incorrectos."});return}
+  if(a==="logout"){auth.signOut();return}
+  if(a==="start")return safe(async()=>{const exp=+b.dataset.exp||0,cnt=num($("#oc").value);confirmClose=false;cart={};
+    await fs.doc("config/day").set({id:"d"+Date.now(),startedAt:new Date().toISOString(),closed:false,openingCash:cnt,expectedOpening:exp,diffOpen:Math.round((cnt-exp)*100)/100})});
+  if(a==="ask"){confirmClose=true;return render()}
+  if(a==="cancel"){confirmClose=false;return render()}
+  if(a==="close")return safe(async()=>{
+    const ms=today(S.members),ss=today(S.sales),mt=sum(ms,"price"),st=sum(ss,"total"),now=new Date().toISOString();
+    const units=ss.reduce((x,s)=>x+(s.items||[]).reduce((y,i)=>y+(+i.qty||0),0),0),should=(+S.day.openingCash||0)+mt+st;
+    await fs.collection("closings").doc(S.day.id).set({dayId:S.day.id,startedAt:S.day.startedAt,closedAt:now,openingCash:+S.day.openingCash||0,members:ms.length,membersTotal:mt,sales:ss.length,units,salesTotal:st,expectedCash:should});
+    await fs.doc("config/day").update({closed:true,closedAt:now,expectedCash:should});confirmClose=false});
+  if(a==="addm")return safe(async()=>{
+    const n=$("#mn").value.trim(),p=$("#mp").value.trim()||"Mensual",v=num($("#mv").value);
+    if(!n||v<=0)return toast("Escribe el nombre y el precio.");
+    await fs.collection("members").add({name:n,plan:p,price:v,paidAt:new Date().toISOString(),dayId:S.day.id});toast("Pago registrado")});
+  if(a==="delm"||a==="deli"){if(armed!==id){armed=id;return render()}armed=null;return safe(()=>fs.doc((a==="delm"?"members/":"inventory/")+id).delete())}
+  if(a==="addi")return safe(async()=>{
+    const n=$("#in").value.trim(),p=num($("#ip").value),s=Math.floor(num($("#is").value));
+    if(!n||p<=0||s<0)return toast("Escribe nombre, precio y cantidad.");
+    await fs.collection("inventory").add({name:n,price:p,stock:s});toast("Producto agregado")});
+  if(a==="restock")return safe(async()=>{
+    const n=Math.floor(num($("#r_"+id).value));if(n<=0)return;
+    await fs.doc("inventory/"+id).update({stock:FV.increment(n)});toast("Stock actualizado")});
+  if(a==="inc"){const it=S.inv.find(x=>x.id===id);if(it&&(cart[id]||0)<it.stock)cart[id]=(cart[id]||0)+1;return render()}
+  if(a==="dec"){if(cart[id]>0)cart[id]--;return render()}
+  if(a==="sell")return safe(async()=>{
+    const items=S.inv.filter(i=>(cart[i.id]||0)>0).map(i=>({id:i.id,name:i.name,qty:cart[i.id],price:i.price,stock:i.stock}));
+    if(!items.length)return;
+    if(items.some(i=>i.qty>i.stock))return toast("Ya no alcanza el stock de algún producto.");
+    const total=items.reduce((t,i)=>t+i.qty*i.price,0),batch=fs.batch();
+    batch.set(fs.collection("sales").doc(),{items:items.map(({id,name,qty,price})=>({id,name,qty,price})),total,paidAt:new Date().toISOString(),dayId:S.day.id});
+    items.forEach(i=>batch.update(fs.doc("inventory/"+i.id),{stock:FV.increment(-i.qty)}));
+    await batch.commit();cart={};toast("Venta registrada: "+money(total))});
+});
+boot();
+</script>
+</body>
+</html>
